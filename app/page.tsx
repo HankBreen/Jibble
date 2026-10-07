@@ -1,98 +1,142 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BarChart3,
   ChevronDown,
   CircleHelp,
-  Flame,
-  Info,
   Menu,
   Mountain,
   RotateCcw,
-  Share2,
   Trophy,
   UserRound,
   X,
 } from "lucide-react";
 
-type GuessState = "correct" | "close" | "wrong";
+import { createClient } from "@/lib/supabase/client";
 
-type Guess = {
-  name: string;
-  country: string;
-  age: string;
-  medals: string;
-  sponsors: string;
-  state: GuessState;
+type Puzzle = { id: string; puzzle_date: string; mask_clip_id: string };
+type MaskClip = { id: string; masked_video_url: string; trick_name: string | null };
+type RevealClip = { reveal_video_url: string | null };
+type Skier = {
+  first_name: string;
+  last_name: string;
+  nationality_code: string | null;
+  birthdate: string | null;
+  olympic_medals: number | null;
+  xgames_medals: number | null;
+  primary_sponsor: string | null;
 };
 
-const skiers = [
-  { name: "Alex Hall", country: "USA", age: "27", medals: "6", sponsors: "7" },
-  { name: "Eileen Gu", country: "CHN", age: "22", medals: "11", sponsors: "10" },
-  { name: "Mikaël Kingsbury", country: "CAN", age: "33", medals: "18", sponsors: "8" },
-  { name: "Kelly Sildaru", country: "EST", age: "24", medals: "7", sponsors: "6" },
-  { name: "Max Parrot", country: "CAN", age: "31", medals: "9", sponsors: "9" },
-];
-
-const answer = skiers[0];
-const alphabetizedSkiers = [...skiers].sort((a, b) => a.name.localeCompare(b.name));
-
-function Silhouette({ revealed }: { revealed: boolean }) {
-  return (
-    <div className={`skier-art ${revealed ? "is-revealed" : ""}`} aria-label={revealed ? answer.name : "Masked skier"}>
-      <div className="snow snow-one" />
-      <div className="snow snow-two" />
-      <div className="skier-head" />
-      <div className="skier-body" />
-      <div className="skier-arm arm-left" />
-      <div className="skier-arm arm-right" />
-      <div className="skier-leg leg-left" />
-      <div className="skier-leg leg-right" />
-      <div className="ski ski-left" />
-      <div className="ski ski-right" />
-      {revealed && <span className="reveal-name">{answer.name}</span>}
-    </div>
-  );
+function getAge(birthdate: string | null) {
+  if (!birthdate) return null;
+  const born = new Date(`${birthdate}T00:00:00`);
+  const today = new Date();
+  let age = today.getFullYear() - born.getFullYear();
+  if (today < new Date(today.getFullYear(), born.getMonth(), born.getDate())) age -= 1;
+  return age;
 }
 
 export default function Home() {
-  const [guess, setGuess] = useState("");
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [guesses, setGuesses] = useState<Guess[]>([]);
+  const [puzzle, setPuzzle] = useState<Puzzle | null>(null);
+  const [clip, setClip] = useState<MaskClip | null>(null);
+  const [skier, setSkier] = useState<Skier | null>(null);
+  const [revealedVideoUrl, setRevealedVideoUrl] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [revealing, setRevealing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showHowTo, setShowHowTo] = useState(false);
   const [activePanel, setActivePanel] = useState<"game" | "stats" | "profile">("game");
 
-  const submitGuess = () => {
-    const selected = skiers.find((skier) => skier.name === guess);
-    if (!selected || guesses.some((item) => item.name === selected.name) || guesses.length >= 6) return;
-    const state: GuessState = selected.name === answer.name ? "correct" : selected.country === answer.country ? "close" : "wrong";
-    setGuesses((current) => [...current, { ...selected, state }]);
-    setGuess("");
-    if (state === "correct" || guesses.length === 5) setRevealed(true);
-  };
+  useEffect(() => {
+    let cancelled = false;
 
-  const resetGame = () => {
-    setGuesses([]);
-    setGuess("");
-    setRevealed(false);
-  };
+    async function loadPuzzle() {
+      const supabase = createClient();
+      const { data: puzzleData, error: puzzleError } = await supabase
+        .from("puzzles")
+        .select("id,puzzle_date,mask_clip_id")
+        .eq("status", "published")
+        .lte("puzzle_date", new Date().toISOString().slice(0, 10))
+        .order("puzzle_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-  const matchingSkiers = useMemo(() => {
-    const query = guess.trim().toLowerCase();
-    return alphabetizedSkiers.filter((skier) => {
-      const available = !guesses.some((item) => item.name === skier.name);
-      return available && (!query || skier.name.toLowerCase().includes(query));
+      if (puzzleError) throw puzzleError;
+      if (!puzzleData) throw new Error("There is no published puzzle available yet.");
+
+      const { data: clipData, error: clipError } = await supabase
+        .from("mask_clips")
+        .select("id,masked_video_url,trick_name")
+        .eq("id", puzzleData.mask_clip_id)
+        .eq("status", "ready")
+        .maybeSingle();
+
+      if (clipError) throw clipError;
+      if (!clipData) throw new Error("The published puzzle does not have a ready masked clip.");
+
+      if (!cancelled) {
+        setPuzzle(puzzleData);
+        setClip(clipData);
+        setLoading(false);
+      }
+    }
+
+    loadPuzzle().catch((error: unknown) => {
+      if (!cancelled) {
+        setLoadError(error instanceof Error ? error.message : "Could not load today's puzzle.");
+        setLoading(false);
+      }
     });
-  }, [guess, guesses]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleReveal = async () => {
+    if (revealed) {
+      setRevealed(false);
+      return;
+    }
+    if (!puzzle || !clip || revealing) return;
+
+    setRevealing(true);
+    setLoadError(null);
+    const supabase = createClient();
+
+    try {
+      const [{ data: puzzleAnswer, error: answerError }, { data: revealClip, error: revealError }] = await Promise.all([
+        supabase.from("puzzles").select("skier_id").eq("id", puzzle.id).single(),
+        supabase.from("mask_clips").select("reveal_video_url").eq("id", clip.id).single(),
+      ]);
+      if (answerError) throw answerError;
+      if (revealError) throw revealError;
+
+      const { data: skierData, error: skierError } = await supabase
+        .from("skiers")
+        .select("first_name,last_name,nationality_code,birthdate,olympic_medals,xgames_medals,primary_sponsor")
+        .eq("id", puzzleAnswer.skier_id)
+        .single();
+      if (skierError) throw skierError;
+
+      setSkier(skierData);
+      setRevealedVideoUrl((revealClip as RevealClip).reveal_video_url);
+      setRevealed(true);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not reveal the skier.");
+    } finally {
+      setRevealing(false);
+    }
+  };
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <button className="brand" onClick={() => setActivePanel("game")} aria-label="Go to today's game">
           <span className="brand-mark"><Mountain size={19} strokeWidth={2.8} /></span>
-          <span>SKI<span>//</span>DLE</span>
+          <span>SKI<span>{"//"}</span>DLE</span>
         </button>
         <nav className="desktop-nav" aria-label="Main navigation">
           <button className={activePanel === "game" ? "nav-active" : ""} onClick={() => setActivePanel("game")}>Today&apos;s game</button>
@@ -109,52 +153,35 @@ export default function Home() {
         <section className="game-page">
           <div className="game-heading">
             <div>
-              <p className="eyebrow"><span className="live-dot" /> DAILY TRICK · #042</p>
+              <p className="eyebrow"><span className="live-dot" /> DAILY TRICK{puzzle ? ` · ${puzzle.puzzle_date}` : ""}</p>
               <h1>Who&apos;s that skier?</h1>
-              <p className="heading-copy">Watch the masked clip. Use the clues to name today&apos;s pro.</p>
+              <p className="heading-copy">Watch today&apos;s masked trick, then reveal the skier.</p>
             </div>
-            <div className="streak-chip"><Flame size={16} fill="currentColor" /> 4 day streak</div>
           </div>
 
           <div className="video-card">
-            <div className="video-topline"><span>TRICK REPLAY</span><span className="clip-time">0:04 <span className="play-dot" /></span></div>
-            <div className="video-stage"><Silhouette revealed={revealed} /><div className="scanline" /></div>
-            <div className="video-caption"><span>{revealed ? "IDENTITY REVEALED" : "IDENTITY MASKED"}</span><span className="caption-dot" /> SLOPE STYLE: SLOPESTYLE</div>
+            <div className="video-topline"><span>TRICK REPLAY</span><span>{clip?.trick_name ?? ""}</span></div>
+            <div className="video-stage video-player-stage">
+              {loading ? <p className="video-message">Loading today&apos;s puzzle...</p> : clip && (!revealed || revealedVideoUrl) ? <video key={revealed ? revealedVideoUrl : clip.masked_video_url} className="puzzle-video" src={revealed ? revealedVideoUrl ?? undefined : clip.masked_video_url} autoPlay muted loop playsInline controls /> : <p className="video-message">{clip ? "No unmasked video is available for this puzzle." : "Puzzle video unavailable."}</p>}
+            </div>
+            <div className="video-caption"><span>{revealed ? "IDENTITY REVEALED" : "IDENTITY MASKED"}<span className="caption-dot" />{clip?.trick_name ?? "TODAY'S TRICK"}</span></div>
           </div>
 
           <div className="game-content">
-            <div className="guess-head"><span className="eyebrow">YOUR GUESSES <b>{guesses.length}/6</b></span><button className="give-up" onClick={() => setRevealed(true)} disabled={revealed}>Give up <Info size={14} /></button></div>
-            <div className="guess-board">
-              <div className="board-header"><span>SKIER</span><span>NATIONALITY</span><span>AGE</span><span>MEDALS</span><span>SPONSORS</span></div>
-              {Array.from({ length: 6 }).map((_, index) => {
-                const item = guesses[index];
-                return <div className={`guess-row ${item?.state ?? "empty"}`} key={index}>
-                  <span className="skier-cell">{item ? item.name : <span className="empty-line" />}</span>
-                  <span>{item ? <Pill value={item.country} type={item.state} /> : <span className="empty-line short" />}</span>
-                  <span>{item ? <Pill value={item.age} type={item.state} /> : <span className="empty-line tiny" />}</span>
-                  <span>{item ? <Pill value={item.medals} type={item.state} /> : <span className="empty-line tiny" />}</span>
-                  <span>{item ? <Pill value={item.sponsors} type={item.state} /> : <span className="empty-line tiny" />}</span>
-                </div>;
-              })}
-            </div>
-            {!revealed ? <div className="guess-form">
-              <div className="search-wrap">
-                <input
-                  value={guess}
-                  onChange={(event) => setGuess(event.target.value)}
-                  onFocus={() => setSearchFocused(true)}
-                  onBlur={() => window.setTimeout(() => setSearchFocused(false), 120)}
-                  placeholder="Search for a skier..."
-                  aria-label="Search for a skier"
-                  autoComplete="off"
-                />
-                {searchFocused && matchingSkiers.length > 0 && <div className="search-results">
-                  {matchingSkiers.map((skier) => <button key={skier.name} type="button" onMouseDown={() => setGuess(skier.name)}><span>{skier.name}</span><small>{skier.country}</small></button>)}
-                </div>}
+            {skier && revealed && <div className="result-card skier-details">
+              <div><p className="eyebrow">TODAY&apos;S SKIER</p><strong>{skier.first_name} {skier.last_name}</strong>
+                <span>{[skier.nationality_code, getAge(skier.birthdate) ? `${getAge(skier.birthdate)} years old` : null].filter(Boolean).join(" · ")}</span>
+                <span>Olympic medals: {skier.olympic_medals ?? 0} · X Games medals: {skier.xgames_medals ?? 0}</span>
+                {skier.primary_sponsor && <span>Sponsor: {skier.primary_sponsor}</span>}
               </div>
-              <button className="submit-button" onClick={submitGuess} disabled={!guess}>Submit guess <span>↵</span></button>
-            </div> : <div className="result-card"><div><p className="eyebrow">{guesses.some((item) => item.state === "correct") ? "NICE WORK" : "THE ANSWER WAS"}</p><strong>{answer.name}</strong><span>{answer.country} · {answer.age} years old</span></div><button className="share-button"><Share2 size={16} /> Share result</button></div>}
-            <div className="legend"><span><i className="legend-dot exact" /> Correct</span><span><i className="legend-dot close" /> Same country</span><span><i className="legend-dot miss" /> Not a match</span><span className="legend-right">Next daily in <b>08:42:16</b></span></div>
+            </div>}
+            <div className="reveal-controls">
+              <button className="submit-button reveal-toggle" type="button" role="switch" aria-checked={revealed} onClick={toggleReveal} disabled={loading || !clip || revealing}>
+                <span className={`toggle-track ${revealed ? "is-on" : ""}`}><span className="toggle-knob" /></span>
+                {revealing ? "Revealing..." : revealed ? "Show masked clip" : "I guessed correctly"}
+              </button>
+              {loadError && <p className="load-error" role="alert">{loadError}</p>}
+            </div>
           </div>
         </section>
       )}
@@ -167,10 +194,6 @@ export default function Home() {
       {showHowTo && <div className="modal-backdrop" onClick={() => setShowHowTo(false)}><div className="how-modal" onClick={(event) => event.stopPropagation()}><button className="close-modal" onClick={() => setShowHowTo(false)} aria-label="Close"><X size={18} /></button><div className="modal-icon"><Mountain size={24} /></div><p className="eyebrow">THE BASICS</p><h2>How to play</h2><p className="modal-intro">Identify the pro skier hidden in today&apos;s trick clip. You have six guesses.</p><div className="how-step"><b>01</b><div><strong>Watch the clip</strong><span>The skier is masked, but their style is still a clue.</span></div></div><div className="how-step"><b>02</b><div><strong>Make a guess</strong><span>Tiles flip to show how your guess compares.</span></div></div><div className="how-step"><b>03</b><div><strong>Share your result</strong><span>Come back tomorrow for a new mystery.</span></div></div><button className="submit-button modal-button" onClick={() => setShowHowTo(false)}>Let&apos;s go <RotateCcw size={15} /></button></div></div>}
     </main>
   );
-}
-
-function Pill({ value, type }: { value: string; type: GuessState }) {
-  return <span className={`value-pill ${type}`}><i />{value}</span>;
 }
 
 function Panel({ title, eyebrow, icon, children }: { title: string; eyebrow: string; icon: React.ReactNode; children: React.ReactNode }) {
